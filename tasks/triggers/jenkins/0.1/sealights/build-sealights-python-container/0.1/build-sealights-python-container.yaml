@@ -1,0 +1,134 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-sealights-python-binaries
+spec:
+  description: |
+    This task takes an existing container image and injects Sealights python binaries into it.
+    The resulting image is tagged and pushed to the specified container registry.
+  results:
+    - name: output-image
+      description: Container image that contains sealights binaries.
+  params:
+    - name: git-url
+      description: Repository URL to clone from.
+      type: string
+    - name: git-revision
+      type: string
+      description: The Git revision (commit SHA) from which the test pipeline is originating.
+      default: "main"
+    - name: git-branch
+      type: string
+      description: The Git branch from which the test pipeline is originating.
+      default: "main"
+    - name: konflux-component
+      type: string
+      description: The Konflux component name used in the build process, which establishes its association with Sealights.
+    - name: storage-driver
+      type: string
+      description: The storage driver to configure for Buildah (e.g., vfs or overlay).
+      default: vfs
+    - description: Reference of the image buildah will produce.
+      name: IMAGE
+      type: string
+      default: "test"
+    - default: ./Dockerfile
+      description: Path to the Dockerfile to build.
+      name: DOCKERFILE
+      type: string
+    - default: .
+      description: Path to the directory to use as context.
+      name: CONTEXT
+      type: string
+  volumes:
+    - name: varlibcontainers
+      emptyDir: {}
+    - name: sourcecode
+      emptyDir: {}
+    - name: sealights-credentials
+      secret:
+        secretName: sealights-credentials
+  steps:
+    - name: clone-source-code
+      image: quay.io/konflux-ci/git-clone@sha256:4e53ebd9242f05ca55bfc8d58b3363d8b9d9bc3ab439d9ab76cdbdf5b1fd42d9
+      env:
+        - name: GIT_URL
+          value: $(params.git-url)
+        - name: GIT_REVISION
+          value: $(params.git-revision)
+        - name: CHECKOUT_DIR
+          value: /source-code
+      volumeMounts:
+        - mountPath: /source-code
+          name: sourcecode
+      script: |
+        /ko-app/git-init \
+          -url="${GIT_URL}" \
+          -revision="${GIT_REVISION}" \
+          -path="${CHECKOUT_DIR}"
+
+    - name: build-sealights-python-image
+      image: registry.access.redhat.com/ubi9/buildah@sha256:c62b2318eb4709c216ad25969abae5ff6b56e9879d266b539a46fdfc99e8361e
+      env:
+        - name: STORAGE_DRIVER
+          value: $(params.storage-driver)
+        - name: COMMIT_SHA
+          value: $(params.git-revision)
+        - name: BRANCH
+          value: $(params.git-branch)
+        - name: KONFLUX_COMPONENT
+          value: $(params.konflux-component)
+        - name: SOURCE_CODE_DIR
+          value: /source-code
+        - name: DOCKERFILE
+          value: $(params.DOCKERFILE)
+        - name: CONTEXT
+          value: $(params.CONTEXT)
+        - name: IMAGE
+          value: $(params.IMAGE)
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        if [ -e "$SOURCE_CODE_DIR/$CONTEXT/$DOCKERFILE" ]; then
+          dockerfile_path="$SOURCE_CODE_DIR/$CONTEXT/$DOCKERFILE"
+        elif [ -e "$SOURCE_CODE_DIR/$DOCKERFILE" ]; then
+          dockerfile_path="$SOURCE_CODE_DIR/$DOCKERFILE"
+        else
+          echo "Cannot find Dockerfile $DOCKERFILE"
+          exit 1
+        fi
+
+        SEALIGHTS_TOKEN="$(cat /usr/local/sealights-credentials/token)"
+
+        BUILDAH_ARGS=()
+        BUILDAH_ARGS+=("--build-arg=SERVICE_NAME=${KONFLUX_COMPONENT}")
+        BUILDAH_ARGS+=("--build-arg=BRANCH_NAME=${BRANCH}")
+        BUILDAH_ARGS+=("--build-arg=BUILD_NAME=${COMMIT_SHA}_$(date +'%y%m%d.%H%M')")
+        BUILDAH_ARGS+=("--build-arg=SEALIGHTS_TOKEN=${SEALIGHTS_TOKEN}")
+
+        BASE_IMAGE_URL="${IMAGE%@*}"
+        SEALIGHTS_IMAGE="${BASE_IMAGE_URL}:${COMMIT_SHA}-sealights"
+
+        buildah build \
+          "${BUILDAH_ARGS[@]}" \
+          --ulimit nofile=4096:4096 \
+          -f "$dockerfile_path" -t "${SEALIGHTS_IMAGE}" $SOURCE_CODE_DIR/$CONTEXT
+
+        # Push the image
+        buildah push \
+          --tls-verify=true \
+          --retry=5 $SEALIGHTS_IMAGE
+
+        echo -n "$SEALIGHTS_IMAGE" > $(results.output-image.path)
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: varlibcontainers
+        - mountPath: /source-code
+          name: sourcecode
+        - name: sealights-credentials
+          mountPath: /usr/local/sealights-credentials
