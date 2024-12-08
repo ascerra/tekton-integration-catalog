@@ -1,0 +1,75 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: sealights-run-pytests
+spec:
+  description: |
+    Run pytests with sealights
+  # results:
+  #   - name: output-image
+  #     description: Container image that contains sealights binaries.
+  params:
+    - name: source-artifact
+      description: The Trusted Artifact URI pointing to the artifact with the application source code.
+      type: string
+  #   - name: git-url
+  #     description: Repository URL to clone from.
+  #     type: string
+  #   - name: git-revision
+  #     type: string
+  #     description: The Git revision (commit SHA) from which the test pipeline is originating.
+  #     default: "main"
+  #   - name: git-branch
+  #     type: string
+  #     description: The Git branch from which the test pipeline is originating.
+  #     default: "main"
+  #   - description: Reference of the image buildah will produce.
+  #     name: IMAGE
+  #     type: string
+  #     default: "test"
+  volumes:
+    - name: sealights-credentials
+      secret:
+        secretName: sealights-credentials
+  steps:
+    - name: run-pytests
+      image: $(params.source-artifact)
+      # env:
+      #   - name: COMMIT_SHA
+      #     value: $(params.git-revision)
+      #   - name: BRANCH
+      #     value: $(params.git-branch)
+      #   - name: IMAGE
+      #     value: $(params.IMAGE)
+      #   - name: GIT_URL
+      #     value: $(params.git-url)
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        # yum install python3-pip -y
+
+        # export TIMESTAMP=$(date +"%Y:%m:%d:%H:%M:%S")
+        # pip install sealights-python-agent
+        # mkdir /app
+        # git clone -b sealights https://github.com/ascerra/todo-list-app
+
+        # pip install --no-cache-dir -r requirements.txt
+        # pip install --no-cache-dir -r robot_requirements.txt
+        # cat /usr/local/sealights-credentials/token > token.txt
+        # sl-python config --appname Python-App-Todo-List --branchname sealights --buildname "PATL-$TIMESTAMP" --exclude '/app/tests/*' --workspacepath /app --tokenfile token.txt
+        # sl-python scan  --buildsessionidfile buildSessionId.txt --scm git --tokenfile token.txt
+
+        cd /app
+        cd todo-list-app
+        sl-python start --buildsessionidfile buildSessionId.txt --teststage pytest --tokenfile token.txt
+        sl-python pytest --buildsessionidfile buildSessionId.txt --teststage pytest --tokenfile token.txt
+        sl-python end --buildsessionidfile buildSessionId.txt --teststage pytest --tokenfile token.txt
+    
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
+      volumeMounts:
+        - name: sealights-credentials
+          mountPath: /usr/local/sealights-credentials
